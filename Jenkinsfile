@@ -1,80 +1,81 @@
 pipeline {
     agent any
 
+    parameters {
+        choice(name: 'ENV', choices: ['dev', 'staging', 'production'], description: 'Choose the environment to deploy')
+    }
+
     tools {
-        maven 'maven-3.9.6' // Adjust the Maven version as per your installation
-        jdk 'jdk-17' // Adjust the JDK version as per your installation
+        gradle 'gradle-8.5'
+        jdk 'jdk-17'
         git 'git'
     }
 
     environment {
-        GIT_REPO_URL = 'https://github.com/subhashis2018/jenkins-cicd-maven.git'
-    }
-
-    parameters {
-        choice(
-            name: 'BRANCH_NAME', 
-            choices: ['master', 'develop', 'feature-branch'], 
-            description: 'Choose the branch to build'
-        )
-        booleanParam(
-            name: 'RUN_TESTS', 
-            defaultValue: true, 
-            description: 'Check if you want to run tests'
-        )
-        booleanParam(
-            name: 'RUN_PMD_ANALYSIS', 
-            defaultValue: true, 
-            description: 'Check if you want to run PMD analysis'
-        )
+        DOCKER_IMAGE = "subhashis2022/jenkins-cicd-gradle"
+        DOCKER_TAG = "${params.ENV}-${env.BUILD_ID}"
+        DOCKER_REGISTRY_CREDENTIALS_ID = 'docker_auth'
+        GITHUB_CREDENTIALS_ID = 'github_auth'
+        GITHUB_REPO = 'https://github.com/subhashis2018/jenkins-cicd-gradle.git'
     }
 
     stages {
-        stage('Clone Repository') {
+        stage('Checkout') {
             steps {
                 script {
-                    git branch: "${params.BRANCH_NAME}", url: "${GIT_REPO_URL}", credentialsId: 'github-auth'
+                    git url: "${env.GITHUB_REPO}", credentialsId: "${env.GITHUB_CREDENTIALS_ID}"
                 }
             }
         }
-        stage('Maven Clean') {
-            steps {
-                sh 'mvn clean'
-            }
-        }
-        stage('Maven Build') {
-            steps {
-                sh 'mvn package'
-            }
-        }
-        stage('Maven Test') {
-            when {
-                expression { params.RUN_TESTS }
-            }
-            steps {
-                sh 'mvn test'
-            }
-        }
-        stage('Jacoco Test Report') {
+
+        stage('Prepare') {
             steps {
                 script {
-                    sh 'mvn jacoco:report'
+                    sh 'chmod +x ./gradlew'
+                }
+            }
+        }
+
+        stage('Build and Test') {
+            steps {
+                script {
+                    sh './gradlew clean build'
+                }
+            }
+        }
+
+        stage('Run PMD and JaCoCo Reports') {
+            steps {
+                script {
+                    sh './gradlew pmdMain pmdTest'
+                    sh './gradlew jacocoTestReport'
                 }
             }
             post {
                 always {
-                    jacoco execPattern: '**/target/jacoco.exec', classPattern: '**/target/classes', sourcePattern: '**/src/main/java'
+                    publishHTML(target: [reportDir: 'build/reports/pmd', reportFiles: 'main.html', reportName: 'PMD Report'])
+                    publishHTML(target: [reportDir: 'build/reports/jacoco/test/html', reportFiles: 'index.html', reportName: 'JaCoCo Report'])
+                    jacoco(execPattern: 'build/jacoco/test.exec', sourcePattern: 'src/main/java', classPattern: 'build/classes/java/main', exclusionPattern: '')
                 }
             }
         }
-    }
 
-    post {
-        success {
-            echo 'Build completed successfully!'
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    sh "docker build -t ${DOCKER_IMAGE}:${DOCKER_TAG} ."
+                }
+            }
         }
-        failure {
-            echo 'Build failed!'
+
+        stage('Push Docker Image') {
+            steps {
+                script {
+                    docker.withRegistry('https://index.docker.io/v1/', "${DOCKER_REGISTRY_CREDENTIALS_ID}") {
+                        docker.image("${DOCKER_IMAGE}:${DOCKER_TAG}").push()
+                    }
+                }
+            }
         }
     }
 }
